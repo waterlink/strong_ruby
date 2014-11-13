@@ -1,8 +1,29 @@
 STRONG_DEBUG = ENV['DEBUG']
 
+Boolean = Struct.new(:value)
+boolean_true = Boolean.new(true)
+boolean_false = Boolean.new(false)
+
+Tuple = Struct.new(:value)
+CallTuple = Struct.new(:value, :locals) do
+  def initialize(program, locals, value)
+    super(value, locals)
+  end
+end
+
+ArgsTuple = Struct.new(:value)
+
+Auto = Class.new
+
+Return = Struct.new(:value)
+
 StrongRuby = Class.new(BasicObject) do
   def initialize(&blk)
     @tokens = instance_eval(&blk)
+  end
+
+  def self.build(&blk)
+    new(&blk).__compile__
   end
 
   def method_missing(*args)
@@ -10,9 +31,13 @@ StrongRuby = Class.new(BasicObject) do
     StrongToken.new(args.map { |x| StrongToken.new(x) })
   end
 
-  def compile
+  def __compile__
     StrongProgram.__dbg__ "compiling #{@tokens}"
     program = StrongCompiler.new(@tokens).compile
+  end
+
+  def __tokens__
+    @tokens
   end
 end
 
@@ -32,7 +57,7 @@ StrongMethod = Struct.new(:name, :compiled_locals, :result) do
     return true unless compiled_locals
 
     compiled_locals.each_with_index do |(k, v), i|
-      return false unless v === args[i] || v == args[i]
+      return false unless v === args[i] || v == args[i] || (Class === v && (args[i] < v || args[i].class < v)) || v == Auto
     end
 
     true
@@ -46,6 +71,16 @@ StrongProgram = Class.new(BasicObject) do
 
   def format(pattern, *args)
     pattern % args
+  end
+
+  def -(a, b)
+    a - b
+  end
+
+  def __if__(condition, locals, block)
+    if condition
+      Return[__expand__(locals, block.value)]
+    end
   end
 
   def self.__dbg__(message)
@@ -76,6 +111,8 @@ StrongProgram = Class.new(BasicObject) do
   end
 
   def self.__try_expand__(locals, body)
+    __dbg__("Trying to expand #{body} with #{locals}")
+
     return __try_lookup__(locals, body.value) if StrongToken === body
     return body unless Array === body
     return body if [] == body
@@ -83,6 +120,9 @@ StrongProgram = Class.new(BasicObject) do
     return __try_expand__(locals, [__try_expand__(locals, body[0])] + body[1..-1]) if Array === body[0]
 
     return __foreign_try_expand__(body[0], locals, body[1..-1]) if StrongProgram === body[0] || (Class === body[0] && body[0] < StrongProgram)
+
+
+    return __try_expand__(locals, [body[0]] + __try_expand__(locals, body[1].value)) if ArgsTuple === body[1]
 
     unless Array === body && ((StrongToken === body[0] && Symbol === body[0].value) || Symbol === body[0])
       raise StrongCompilationError.new("#{body} does not look like an expandable call")
@@ -109,12 +149,15 @@ StrongProgram = Class.new(BasicObject) do
 
     return __lookup__(locals, body.value)
       .tap { |value| StrongProgram.__dbg__ "#{body} => #{value} in locals" } if StrongToken === body
+
     return body unless Array === body
     return nil if [] == body
 
     return __expand__(locals, [__expand__(locals, body[0])] + body[1..-1]) if Array === body[0]
 
     return __foreign_expand__(body[0], locals, body[1..-1]) if StrongProgram === body[0] || (Class === body[0] && body[0] < StrongProgram)
+
+    return __expand__(locals, [body[0]] + __expand__(locals, body[1].value)) if ArgsTuple === body[1]
 
     name = body[0]
     name = Symbol === name ? name : name.value
@@ -164,6 +207,13 @@ StrongProgram = Class.new(BasicObject) do
     method.legit?(name, args)
   end
 
+  def __legit__?(program, name, args)
+    program.__methods__.each do |method|
+      return true if program.__legit__?(method, name, args)
+    end
+    false
+  end
+
   def self.__try_lookup__(locals, name)
     raise StrongCompilationError.new("#{name} is not found in local scope") unless locals.has_key?(name)
     locals[name]
@@ -181,6 +231,9 @@ StrongProgram = Class.new(BasicObject) do
     @___methods__ ||= [
       :println,
       StrongMethod.new(:format, nil, String),
+      StrongMethod.new(:-, { a: Numeric, b: Numeric }, Numeric),
+      StrongMethod.new(:__legit__?, { program: StrongProgram, name: Symbol, args: Array }, Boolean),
+      StrongMethod.new(:__if__, { condition: Boolean, locals: Hash, block: CallTuple }, Auto),
     ]
   end
 end
@@ -229,6 +282,27 @@ StrongCompiler = Class.new do
     end
   end
 
+  # last signature should be the most generic one - it is used as a signature for method
+  def match(name, body)
+    raise StrongCompilationError.new("#{body} should contain even elements (signature, body pair), i.e.: [params => type], [body], ...") unless body.count.even?
+
+    patterns = body.each_slice(2).map { |x| x }
+    me = @program
+
+    fn(name, patterns.last[0], patterns.first[1])
+
+    patterns.each_with_index do |(signature, body), index|
+      fn(:"__match__#{name}_#{index}", signature, body)
+    end
+
+    fn(name, patterns.last[0], StrongRuby.new {
+      patterns.each_with_index.map { |(signature, body), index|
+        lname = :"__match__#{name}_#{index}"
+        [:__if__, [__legit__?, me, lname, __args__], __locals__, CallTuple[me, __locals__, [lname, ArgsTuple[__args__]]]]
+      }
+    }.__tokens__)
+  end
+
   def fn(name, signature, body)
     StrongProgram.__dbg__ "Defining fn #{name}#{signature} with #{body}"
 
@@ -247,14 +321,15 @@ StrongCompiler = Class.new do
     params = signature[0].first[0]
     result = signature[0].first[1]
     compiled_locals = params[0] || {}
+    args = compiled_locals.map { |_, v| v }
 
     real_result = nil
     body.each do |tokens|
-      real_result = @program.__try_expand__(compiled_locals, tokens)
+      real_result = @program.__try_expand__(compiled_locals.merge(__args__: args, __locals__: compiled_locals), tokens)
     end
     result_type = Class === real_result ? real_result : real_result.class
 
-    raise StrongCompilationError.new("#{signature} function should return #{result} but it returns #{result_type}") unless result_type == result || result_type < result
+    raise StrongCompilationError.new("#{name.value}#{signature} function should return #{result} but it returns #{result_type}") unless result_type == result || result_type < result || Auto == result_type
 
     name = Symbol === name ? name : name.value
 
@@ -264,10 +339,16 @@ StrongCompiler = Class.new do
       define_method(name) do |*args|
         StrongProgram.__dbg__ "I have a body: #{body}; And I got #{args}"
         locals = compiled_locals.each_with_index.map { |(k, v), i| [k, args[i]] }.to_h
+        locals[:__args__] = args
+        locals[:__locals__] = locals
 
         result = nil
         body.each do |tokens|
           result = __expand__(locals, tokens)
+          if Return === result
+            result = result.value
+            break
+          end
         end
         result
       end
