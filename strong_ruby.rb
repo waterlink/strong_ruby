@@ -55,17 +55,34 @@ StrongProgram = Class.new(BasicObject) do
   def __call__(name, *args)
     StrongProgram.__dbg__ "__call__ #{name}#{args}"
     self.__send__(name, *args)
-      .tap { |result| StrongProgram.__dbg__ "__call__ [#{name}] Result: #{result}" }
+  end
+
+  def self.__call__(name, *args)
+    StrongProgram.__dbg__ "self.__call__ #{name}#{args}"
+    self.__send__(name, *args)
   end
 
   def inspect
     "A Strong Ruby Program"
+  end
+  alias :to_s :inspect
+
+  def self.inspect
+    "A Strong Ruby Program Class"
+  end
+
+  def self.to_s
+    inspect
   end
 
   def self.__try_expand__(locals, body)
     return __try_lookup__(locals, body.value) if StrongToken === body
     return body unless Array === body
     return body if [] == body
+
+    return __try_expand__(locals, [__try_expand__(locals, body[0])] + body[1..-1]) if Array === body[0]
+
+    return __foreign_try_expand__(body[0], locals, body[1..-1]) if StrongProgram === body[0] || (Class === body[0] && body[0] < StrongProgram)
 
     unless Array === body && ((StrongToken === body[0] && Symbol === body[0].value) || Symbol === body[0])
       raise StrongCompilationError.new("#{body} does not look like an expandable call")
@@ -80,10 +97,59 @@ StrongProgram = Class.new(BasicObject) do
     method = __methods__.find { |m| __legit__?(m, name, args) }
 
     unless method
+      __dbg__("Defined methods are: #{__methods__}")
       raise StrongCompilationError.new("#{StrongMethod.representation(name, args)} is not defined")
     end
 
     __result_of__(method)
+  end
+
+  def __expand__(locals, body)
+    StrongProgram.__dbg__ "Expanding #{body}"
+
+    return __lookup__(locals, body.value)
+      .tap { |value| StrongProgram.__dbg__ "#{body} => #{value} in locals" } if StrongToken === body
+    return body unless Array === body
+    return nil if [] == body
+
+    return __expand__(locals, [__expand__(locals, body[0])] + body[1..-1]) if Array === body[0]
+
+    return __foreign_expand__(body[0], locals, body[1..-1]) if StrongProgram === body[0] || (Class === body[0] && body[0] < StrongProgram)
+
+    name = body[0]
+    name = Symbol === name ? name : name.value
+    args = body[1..-1].map do |tokens|
+      __expand__(locals, tokens)
+    end
+    __call__(name, *args)
+  end
+
+  def self.__expand__(locals, body)
+    StrongProgram.__dbg__ "Expanding #{body}"
+
+    return __lookup__(locals, body.value)
+      .tap { |value| StrongProgram.__dbg__ "#{body} => #{value} in locals" } if StrongToken === body
+    return body unless Array === body
+    return nil if [] == body
+
+    return __expand__(locals, body[0]) if Array === body[0]
+
+    return __foreign_expand__(body.shift, locals, body) if StrongProgram === body[0] || (Class === body[0] && body[0] < StrongProgram)
+
+    name = body.shift
+    name = Symbol === name ? name : name.value
+    args = body.map do |tokens|
+      __expand__(locals, tokens)
+    end
+    __call__(name, *args)
+  end
+
+  def self.__foreign_try_expand__(foreigner, locals, body)
+    foreigner.__try_expand__(locals, body)
+  end
+
+  def __foreign_expand__(foreigner, locals, body)
+    foreigner.__expand__(locals, body)
   end
 
   def self.__result_of__(method)
@@ -107,17 +173,8 @@ StrongProgram = Class.new(BasicObject) do
     locals[name]
   end
 
-  def __expand__(locals, body)
-    StrongProgram.__dbg__ "Expanding #{body}"
-    return __lookup__(locals, body.value).tap { |value| StrongProgram.__dbg__ "#{body} => #{value} in locals" } if StrongToken === body
-    return body unless Array === body
-    return nil if [] == body
-    name = body.shift
-    name = Symbol === name ? name : name.value
-    args = body.map do |tokens|
-      __expand__(locals, tokens)
-    end
-    __call__(name, *args)
+  def self.__lookup__(locals, name)
+    locals[name]
   end
 
   def self.__methods__
@@ -165,6 +222,11 @@ StrongCompiler = Class.new do
 
   def constructor(signature, body)
     fn(:initialize, [signature => NilClass], body + [nil])
+    me = @program
+
+    @program.class_eval do
+      __methods__ << StrongMethod.new(:new, (signature[0] || {}), me)
+    end
   end
 
   def fn(name, signature, body)

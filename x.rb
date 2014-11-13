@@ -19,3 +19,17 @@ Greeter = StrongRuby.new do
 end.compile
 
 Greeter.new("Alex", "Hello").say
+
+UltimateGreeter = StrongRuby.new do
+  [[let, greeter: Greeter],
+
+   [constructor, [name: String], [
+     [:greeter=, [Greeter, new, name, "Ultimately Greetings"]],
+  ]],
+
+  [fn, say, [[] => NilClass], [
+    [[greeter], say],
+  ]]]
+end.compile
+
+UltimateGreeter.new("Alexey").say
