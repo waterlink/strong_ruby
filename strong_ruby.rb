@@ -67,11 +67,11 @@ StrongProgram = Class.new(BasicObject) do
     return body unless Array === body
     return body if [] == body
 
-    unless Array === body && StrongToken === body[0] && Symbol === body[0].value
+    unless Array === body && ((StrongToken === body[0] && Symbol === body[0].value) || Symbol === body[0])
       raise StrongCompilationError.new("#{body} does not look like an expandable call")
     end
 
-    name = body[0].value
+    name = Symbol === body[0] ? body[0] : body[0].value
 
     args = body[1..-1].map do |tokens|
       __try_expand__(locals, tokens)
@@ -112,7 +112,8 @@ StrongProgram = Class.new(BasicObject) do
     return __lookup__(locals, body.value).tap { |value| StrongProgram.__dbg__ "#{body} => #{value} in locals" } if StrongToken === body
     return body unless Array === body
     return nil if [] == body
-    name = body.shift.value
+    name = body.shift
+    name = Symbol === name ? name : name.value
     args = body.map do |tokens|
       __expand__(locals, tokens)
     end
@@ -145,7 +146,25 @@ StrongCompiler = Class.new do
       end
     end
 
-    @program.new
+    @program
+  end
+
+  def let(lets)
+    StrongProgram.__dbg__ "Defining let #{lets}"
+
+    raise StrongCompilationError.new("#{lets} should be a hash containing lets signature: { var1: type1, var2: type2, ... }") unless Hash === lets
+
+    @program.class_eval do
+      lets.each do |name, type|
+        __methods__ << StrongMethod.new(name, {}, type)
+        __methods__ << StrongMethod.new(:"#{name}=", { value: type }, type)
+        attr_accessor name
+      end
+    end
+  end
+
+  def constructor(signature, body)
+    fn(:initialize, [signature => NilClass], body + [nil])
   end
 
   def fn(name, signature, body)
@@ -175,10 +194,12 @@ StrongCompiler = Class.new do
 
     raise StrongCompilationError.new("#{signature} function should return #{result} but it returns #{result_type}") unless result_type == result || result_type < result
 
-    @program.class_eval do
-      __methods__ << StrongMethod.new(name.value, compiled_locals, result)
+    name = Symbol === name ? name : name.value
 
-      define_method(name.value) do |*args|
+    @program.class_eval do
+      __methods__ << StrongMethod.new(name, compiled_locals, result)
+
+      define_method(name) do |*args|
         StrongProgram.__dbg__ "I have a body: #{body}; And I got #{args}"
         locals = compiled_locals.each_with_index.map { |(k, v), i| [k, args[i]] }.to_h
 
@@ -198,6 +219,10 @@ StrongToken = Class.new(StrongRuby) do
     @value = value
   end
 
+  def self.[](value)
+    new(value)
+  end
+
   def value
     @value
   end
@@ -212,3 +237,5 @@ StrongToken = Class.new(StrongRuby) do
     [value]
   end
 end
+
+CT = StrongToken
